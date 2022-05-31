@@ -1867,6 +1867,7 @@ def main():
     secret_key = os.getenv('SECRET_KEY')
     server_endpoint = os.getenv('SERVER_ENDPOINT', 'play.min.io')
     secure = os.getenv('ENABLE_HTTPS', '1') == '1'
+    skip_sse_tests = os.getenv('SKIP_SSE_TESTS', '0') == '1'
 
     if server_endpoint == 'play.min.io':
         access_key = 'Q3AM3UQ867SPQQA43P2F'
@@ -1901,7 +1902,7 @@ def main():
             shutil.copyfileobj(LimitedRandomReader(11 * MB), file_data)
 
     ssec = None
-    if secure:
+    if secure and not skip_sse_tests:
         # Create a Customer Key of 32 Bytes for Server Side Encryption (SSE-C)
         cust_key = b'AABBCCDDAABBCCDDAABBCCDDAABBCCDD'
         # Create an SSE-C object with provided customer key
