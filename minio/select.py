@@ -219,7 +219,7 @@ class SelectRequest:
     def __init__(self, expression, input_serialization, output_serialization,
                  request_progress=False, scan_start_range=None,
                  scan_end_range=None):
-        self._expession = expression
+        self._expression = expression
         if not isinstance(
                 input_serialization,
                 (
@@ -249,7 +249,7 @@ class SelectRequest:
     def toxml(self, element):
         """Convert to XML."""
         element = Element("SelectObjectContentRequest")
-        SubElement(element, "Expression", self._expession)
+        SubElement(element, "Expression", self._expression)
         SubElement(element, "ExpressionType", "SQL")
         self._input_serialization.toxml(
             SubElement(element, "InputSerialization"),
@@ -420,13 +420,10 @@ class SelectObjectReader:
         Stream extracted payload from response data. Upon completion, caller
         should call self.close() to release network resources.
         """
-        while True:
-            if self._payload:
+        while self._read() > 0:
+            while self._payload:
                 result = self._payload
                 if num_bytes < len(self._payload):
                     result = self._payload[:num_bytes]
                 self._payload = self._payload[len(result):]
                 yield result
-
-            if self._read() <= 0:
-                break

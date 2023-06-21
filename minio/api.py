@@ -26,7 +26,10 @@ from __future__ import absolute_import
 import itertools
 import os
 import platform
+import tarfile
 from datetime import timedelta
+from io import BytesIO
+from random import random
 from threading import Thread
 from urllib.parse import urlunsplit
 from xml.etree import ElementTree as ET
@@ -84,6 +87,7 @@ class Minio:  # pylint: disable=too-many-public-methods
     :param region: Region name of buckets in S3 service.
     :param http_client: Customized HTTP client.
     :param credentials: Credentials provider of your account in S3 service.
+    :param cert_check: Flag to indicate to verify SSL certificate or not.
     :return: :class:`Minio <Minio>` object
 
     Example::
@@ -116,7 +120,8 @@ class Minio:  # pylint: disable=too-many-public-methods
                  secure=True,
                  region=None,
                  http_client=None,
-                 credentials=None):
+                 credentials=None,
+                 cert_check=True):
         # Validate http client has correct base class.
         if http_client and not isinstance(
                 http_client,
@@ -142,7 +147,7 @@ class Minio:  # pylint: disable=too-many-public-methods
         self._http = http_client or urllib3.PoolManager(
             timeout=urllib3.util.Timeout(connect=timeout, read=timeout),
             maxsize=10,
-            cert_reqs='CERT_REQUIRED',
+            cert_reqs='CERT_REQUIRED' if cert_check else 'CERT_NONE',
             ca_certs=os.environ.get('SSL_CERT_FILE') or certifi.where(),
             retries=urllib3.Retry(
                 total=5,
@@ -166,7 +171,7 @@ class Minio:  # pylint: disable=too-many-public-methods
             307: ("Redirect", "Temporary redirect"),
             400: ("BadRequest", "Bad request"),
         }.get(response.status, (None, None))
-        region = response.getheader("x-amz-bucket-region")
+        region = response.headers.get("x-amz-bucket-region")
         if message and region:
             message += "; use region " + region
 
@@ -274,7 +279,7 @@ class Minio:  # pylint: disable=too-many-public-methods
         if self._trace_stream:
             self._trace_stream.write(f"HTTP/1.1 {response.status}\n")
             self._trace_stream.write(
-                headers_to_strings(response.getheaders()),
+                headers_to_strings(response.headers),
             )
             self._trace_stream.write("\n")
 
@@ -297,7 +302,7 @@ class Minio:  # pylint: disable=too-many-public-methods
 
         if (
                 method != "HEAD" and
-                "application/xml" not in response.getheader(
+                "application/xml" not in response.headers.get(
                     "content-type", "",
                 ).split(";")
         ):
@@ -310,7 +315,7 @@ class Minio:  # pylint: disable=too-many-public-methods
                 )
             raise InvalidResponseError(
                 response.status,
-                response.getheader("content-type"),
+                response.headers.get("content-type"),
                 response.data.decode() if response.data else None,
             )
 
@@ -319,7 +324,7 @@ class Minio:  # pylint: disable=too-many-public-methods
                 self._trace_stream.write("----------END-HTTP----------\n")
             raise InvalidResponseError(
                 response.status,
-                response.getheader("content-type"),
+                response.headers.get("content-type"),
                 None,
             )
 
@@ -373,8 +378,8 @@ class Minio:  # pylint: disable=too-many-public-methods
                 code,
                 message,
                 url.path,
-                response.getheader("x-amz-request-id"),
-                response.getheader("x-amz-id-2"),
+                response.headers.get("x-amz-request-id"),
+                response.headers.get("x-amz-id-2"),
                 response,
                 bucket_name=bucket_name,
                 object_name=object_name,
@@ -996,7 +1001,7 @@ class Minio:  # pylint: disable=too-many-public-methods
 
     def fget_object(self, bucket_name, object_name, file_path,
                     request_headers=None, ssec=None, version_id=None,
-                    extra_query_params=None, tmp_file_path=None):
+                    extra_query_params=None, tmp_file_path=None, progress=None):
         """
         Downloads data of an object to file.
 
@@ -1009,6 +1014,7 @@ class Minio:  # pylint: disable=too-many-public-methods
         :param version_id: Version-ID of the object.
         :param extra_query_params: Extra query parameters for advanced usage.
         :param tmp_file_path: Path to a temporary file.
+        :param progress: A progress object
         :return: Object information.
 
         Example::
@@ -1029,6 +1035,8 @@ class Minio:  # pylint: disable=too-many-public-methods
         """
         check_bucket_name(bucket_name)
         check_non_empty_string(object_name)
+        if progress and not isinstance(progress, Thread):
+            raise TypeError("progress object must be instance of Thread")
 
         if os.path.isdir(file_path):
             raise ValueError(f"file {file_path} is a directory")
@@ -1044,32 +1052,29 @@ class Minio:  # pylint: disable=too-many-public-methods
         )
 
         # Write to a temporary file "file_path.part.minio" before saving.
-        tmp_file_path = (
-            tmp_file_path or file_path + "." + stat.etag + ".part.minio"
-        )
-        try:
-            tmp_file_stat = os.stat(tmp_file_path)
-        except IOError:
-            tmp_file_stat = None  # Ignore this error.
-        offset = tmp_file_stat.st_size if tmp_file_stat else 0
-        if offset > stat.size:
-            os.remove(tmp_file_path)
-            offset = 0
+        tmp_file_path = tmp_file_path or f"{file_path}.{stat.etag}.part.minio"
 
         response = None
         try:
             response = self.get_object(
                 bucket_name,
                 object_name,
-                offset=offset,
                 request_headers=request_headers,
                 ssec=ssec,
                 version_id=version_id,
                 extra_query_params=extra_query_params,
             )
-            with open(tmp_file_path, "ab") as tmp_file:
+
+            if progress:
+                # Set progress bar length and object name before upload
+                length = int(response.headers.get('content-length', 0))
+                progress.set_meta(object_name=object_name, total_length=length)
+
+            with open(tmp_file_path, "wb") as tmp_file:
                 for data in response.stream(amt=1024*1024):
-                    tmp_file.write(data)
+                    size = tmp_file.write(data)
+                    if progress:
+                        progress.update(size)
             if os.path.exists(file_path):
                 os.remove(file_path)  # For windows compatibility.
             os.rename(tmp_file_path, file_path)
@@ -1285,9 +1290,9 @@ class Minio:  # pylint: disable=too-many-public-methods
         return ObjectWriteResult(
             bucket_name,
             object_name,
-            response.getheader("x-amz-version-id"),
+            response.headers.get("x-amz-version-id"),
             etag,
-            response.getheaders(),
+            response.headers,
             last_modified=last_modified,
         )
 
@@ -1585,9 +1590,9 @@ class Minio:  # pylint: disable=too-many-public-methods
         return ObjectWriteResult(
             bucket_name,
             object_name,
-            response.getheader("x-amz-version-id"),
-            response.getheader("etag").replace('"', ""),
-            response.getheaders(),
+            response.headers.get("x-amz-version-id"),
+            response.headers.get("etag").replace('"', ""),
+            response.headers,
         )
 
     def _upload_part(self, bucket_name, object_name, data, headers,
@@ -1766,7 +1771,7 @@ class Minio:  # pylint: disable=too-many-public-methods
     def list_objects(self, bucket_name, prefix=None, recursive=False,
                      start_after=None, include_user_meta=False,
                      include_version=False, use_api_v1=False,
-                     use_url_encoding_type=True):
+                     use_url_encoding_type=True, fetch_owner=False):
         """
         Lists object information of a bucket.
 
@@ -1824,6 +1829,7 @@ class Minio:  # pylint: disable=too-many-public-methods
             use_api_v1=use_api_v1,
             include_version=include_version,
             encoding_type="url" if use_url_encoding_type else None,
+            fetch_owner=fetch_owner,
         )
 
     def stat_object(self, bucket_name, object_name, ssec=None, version_id=None,
@@ -1870,7 +1876,7 @@ class Minio:  # pylint: disable=too-many-public-methods
             query_params=query_params,
         )
 
-        last_modified = response.getheader("last-modified")
+        last_modified = response.headers.get("last-modified")
         if last_modified:
             last_modified = time.from_http_header(last_modified)
 
@@ -1878,11 +1884,11 @@ class Minio:  # pylint: disable=too-many-public-methods
             bucket_name,
             object_name,
             last_modified=last_modified,
-            etag=response.getheader("etag", "").replace('"', ""),
-            size=int(response.getheader("content-length", "0")),
-            content_type=response.getheader("content-type"),
+            etag=response.headers.get("etag", "").replace('"', ""),
+            size=int(response.headers.get("content-length", "0")),
+            content_type=response.headers.get("content-type"),
             metadata=response.headers,
-            version_id=response.getheader("x-amz-version-id"),
+            version_id=response.headers.get("x-amz-version-id"),
         )
 
     def remove_object(self, bucket_name, object_name, version_id=None):
@@ -1968,7 +1974,7 @@ class Minio:  # pylint: disable=too-many-public-methods
                 ],
             )
             for error in errors:
-                print("error occured when deleting object", error)
+                print("error occurred when deleting object", error)
 
             # Remove a prefix recursively.
             delete_object_list = map(
@@ -1977,7 +1983,7 @@ class Minio:  # pylint: disable=too-many-public-methods
             )
             errors = client.remove_objects("my-bucket", delete_object_list)
             for error in errors:
-                print("error occured when deleting object", error)
+                print("error occurred when deleting object", error)
         """
         check_bucket_name(bucket_name)
 
@@ -2595,7 +2601,7 @@ class Minio:  # pylint: disable=too-many-public-methods
 
         Example::
             config = ObjectLockConfig(GOVERNANCE, 15, DAYS)
-            client.set_object_lock_condig("my-bucket", config)
+            client.set_object_lock_config("my-bucket", config)
         """
         check_bucket_name(bucket_name)
         if not isinstance(config, ObjectLockConfig):
@@ -2672,6 +2678,82 @@ class Minio:  # pylint: disable=too-many-public-methods
             headers={"Content-MD5": md5sum_hash(body)},
             query_params=query_params,
         )
+
+    def upload_snowball_objects(self, bucket_name, object_list, metadata=None,
+                                sse=None, tags=None, retention=None,
+                                legal_hold=False, staging_filename=None,
+                                compression=False):
+        """
+        Uploads multiple objects in a single put call. It is done by creating
+        intermediate TAR file optionally compressed which is uploaded to S3
+        service.
+
+        :param bucket_name: Name of the bucket.
+        :param object_list: An iterable containing
+            :class:`SnowballObject <SnowballObject>` object.
+        :param metadata: Any additional metadata to be uploaded along
+            with your PUT request.
+        :param sse: Server-side encryption.
+        :param tags: :class:`Tags` for the object.
+        :param retention: :class:`Retention` configuration object.
+        :param legal_hold: Flag to set legal hold for the object.
+        :param staging_filename: A staging filename to create intermediate
+            tarball.
+        :param compression: Flag to compress TAR ball.
+        :return: :class:`ObjectWriteResult` object.
+
+        Example::
+            # Upload snowball object.
+            result = client.upload_snowball_objects(
+                "my-bucket",
+                [
+                    SnowballObject("my-object1", filename="/etc/hostname"),
+                    SnowballObject(
+                        "my-object2", data=io.BytesIO("hello"), length=5,
+                    ),
+                    SnowballObject(
+                        "my-object3", data=io.BytesIO("world"), length=5,
+                        mod_time=datetime.now(),
+                    ),
+                ],
+            )
+        """
+        check_bucket_name(bucket_name)
+
+        object_name = f"snowball.{random()}.tar"
+
+        # turn list like objects into an iterator.
+        object_list = itertools.chain(object_list)
+
+        metadata = metadata or {}
+        metadata["X-Amz-Meta-Snowball-Auto-Extract"] = "true"
+
+        name = staging_filename
+        mode = "w:gz" if compression else "w"
+        fileobj = None if name else BytesIO()
+        with tarfile.open(name=name, mode=mode, fileobj=fileobj) as tar:
+            for obj in object_list:
+                if obj.filename:
+                    tar.add(obj.filename, obj.object_name)
+                else:
+                    info = tarfile.TarInfo(obj.object_name)
+                    info.size = obj.length
+                    info.mtime = time.to_float(obj.mod_time or time.utcnow())
+                    tar.addfile(info, obj.data)
+
+        if not name:
+            length = fileobj.tell()
+            fileobj.seek(0)
+
+        if name:
+            return self.fput_object(bucket_name, object_name, staging_filename,
+                                    metadata=metadata, sse=sse,
+                                    tags=tags, retention=retention,
+                                    legal_hold=legal_hold, part_size=length)
+        return self.put_object(bucket_name, object_name, fileobj,
+                               length, metadata=metadata, sse=sse,
+                               tags=tags, retention=retention,
+                               legal_hold=legal_hold, part_size=length)
 
     def _list_objects(  # pylint: disable=too-many-arguments,too-many-branches
             self,

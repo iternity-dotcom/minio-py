@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # MinIO Python Library for Amazon S3 Compatible Cloud Storage,
-# (C) 2015 MinIO, Inc.
+# (C) 2023 MinIO, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,8 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
+from datetime import datetime
+
 from minio import Minio
-from minio.deleteobjects import DeleteObject
+from minio.commonconfig import SnowballObject
 
 client = Minio(
     "play.min.io",
@@ -23,23 +26,16 @@ client = Minio(
     secret_key="zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG",
 )
 
-# Remove list of objects.
-errors = client.remove_objects(
+client.upload_snowball_objects(
     "my-bucket",
     [
-        DeleteObject("my-object1"),
-        DeleteObject("my-object2"),
-        DeleteObject("my-object3", "13f88b18-8dcd-4c83-88f2-8631fdb6250c"),
+        SnowballObject("my-object1", filename="/etc/hostname"),
+        SnowballObject(
+            "my-object2", data=io.BytesIO(b"hello"), length=5,
+        ),
+        SnowballObject(
+            "my-object3", data=io.BytesIO(b"world"), length=5,
+            mod_time=datetime.now(),
+        ),
     ],
 )
-for error in errors:
-    print("error occurred when deleting object", error)
-
-# Remove a prefix recursively.
-delete_object_list = map(
-    lambda x: DeleteObject(x.object_name),
-    client.list_objects("my-bucket", "my/prefix/", recursive=True),
-)
-errors = client.remove_objects("my-bucket", delete_object_list)
-for error in errors:
-    print("error occurred when deleting object", error)
