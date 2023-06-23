@@ -301,8 +301,8 @@ class CompleteMultipartUploadResult:
         self._etag = findtext(element, "ETag")
         if self._etag:
             self._etag = self._etag.replace('"', "")
-        self._version_id = response.getheader("x-amz-version-id")
-        self._http_headers = response.getheaders()
+        self._version_id = response.headers.get("x-amz-version-id")
+        self._http_headers = response.headers
 
     @property
     def bucket_name(self):
@@ -772,9 +772,9 @@ class PostPolicy:
             )
         policy["conditions"].append([_EQ, "$x-amz-date", amz_date])
 
-        policy = base64.b64encode(json.dumps(policy).encode())
+        policy = base64.b64encode(json.dumps(policy).encode()).decode("utf-8")
         signature = post_presign_v4(
-            policy.decode(), creds.secret_key, utcnow, region,
+            policy, creds.secret_key, utcnow, region,
         )
         form_data = {
             "x-amz-algorithm": _ALGORITHM,
@@ -840,7 +840,7 @@ class EventIterable:
     def __next__(self):
         records = None
         while not records:
-            if not self._response:
+            if not self._response or self._response.closed:
                 self._response = self._func()
             records = self._get_records()
         return records

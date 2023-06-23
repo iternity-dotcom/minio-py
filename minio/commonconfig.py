@@ -387,7 +387,7 @@ class ObjectConditionalReadArgs:
 
 
 class CopySource(ObjectConditionalReadArgs):
-    """A source object defintion for copy_object method."""
+    """A source object definition for copy_object method."""
     @classmethod
     def of(cls, src):
         """Create CopySource from another source."""
@@ -399,7 +399,7 @@ class CopySource(ObjectConditionalReadArgs):
 
 
 class ComposeSource(ObjectConditionalReadArgs):
-    """A source object defintion for compose_object method."""
+    """A source object definition for compose_object method."""
 
     def __init__(self, bucket_name, object_name, region=None, version_id=None,
                  ssec=None, offset=None, length=None, match_etag=None,
@@ -466,3 +466,48 @@ class ComposeSource(ObjectConditionalReadArgs):
             src.ssec, src.offset, src.length, src.match_etag,
             src.not_match_etag, src.modified_since, src.unmodified_since,
         )
+
+
+class SnowballObject:
+    """A source object definition for upload_snowball_objects method."""
+
+    def __init__(self, object_name, filename=None, data=None, length=None,
+                 mod_time=None):
+        self._object_name = object_name
+        if (filename is not None) ^ (data is not None):
+            self._filename = filename
+            self._data = data
+            self._length = length
+        else:
+            raise ValueError("only one of filename or data must be provided")
+        if (
+                mod_time is not None and
+                not isinstance(mod_time, datetime.datetime)
+        ):
+            raise ValueError("mod_time must be datetime.datetime type")
+        self._mod_time = mod_time
+
+    @property
+    def object_name(self):
+        """Get object name."""
+        return self._object_name
+
+    @property
+    def filename(self):
+        """Get filename."""
+        return self._filename
+
+    @property
+    def data(self):
+        """Get data."""
+        return self._data
+
+    @property
+    def length(self):
+        """Get length."""
+        return self._length
+
+    @property
+    def mod_time(self):
+        """Get modification time."""
+        return self._mod_time
